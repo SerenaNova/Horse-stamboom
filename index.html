@@ -4,11 +4,15 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Horse Nation — Stamboom</title>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 <style>
   html, body, #root { height: 100%; margin: 0; }
   body { background: #0c0a09; }
+  .hn-spin { animation: hn-spin 1s linear infinite; }
+  @keyframes hn-spin { to { transform: rotate(360deg); } }
 </style>
 </head>
 <body>
@@ -46,10 +50,33 @@
   };
 </script>
 
-<script type="text/babel" data-type="module" data-presets="react">
-import React, { useState, useEffect, useCallback, useMemo, useRef } from "https://esm.sh/react@18";
-import { createRoot } from "https://esm.sh/react-dom@18/client";
-import { Plus, X, Search, Trash2, Link2, Upload, Download, Loader2, Check, LayoutGrid, ChevronDown, AlertTriangle, Star, Rows, RefreshCw } from "https://esm.sh/lucide-react@0.383.0?external=react";
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useCallback, useMemo, useRef } = React;
+
+// ---------- inline icon set (no external icon package needed) ----------
+function Icon({ size = 16, className = '', children, viewBox = "0 0 24 24" }) {
+  return (
+    <svg width={size} height={size} viewBox={viewBox} fill="none" stroke="currentColor" strokeWidth="2"
+      strokeLinecap="round" strokeLinejoin="round" className={className}>
+      {children}
+    </svg>
+  );
+}
+const Plus = (p) => <Icon {...p}><path d="M12 5v14M5 12h14"/></Icon>;
+const X = (p) => <Icon {...p}><path d="M18 6 6 18M6 6l12 12"/></Icon>;
+const Search = (p) => <Icon {...p}><circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/></Icon>;
+const Trash2 = (p) => <Icon {...p}><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></Icon>;
+const Link2 = (p) => <Icon {...p}><path d="M15 7h3a5 5 0 0 1 0 10h-3"/><path d="M9 17H6a5 5 0 0 1 0-10h3"/><path d="M8 12h8"/></Icon>;
+const Upload = (p) => <Icon {...p}><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/><path d="M5 21h14"/></Icon>;
+const Download = (p) => <Icon {...p}><path d="M12 5v14"/><path d="m5 12 7 7 7-7"/><path d="M5 21h14"/></Icon>;
+const Loader2 = (p) => <Icon {...p} className={(p.className || '') + ' hn-spin'}><path d="M21 12a9 9 0 1 1-6.219-8.56"/></Icon>;
+const Check = (p) => <Icon {...p}><path d="M20 6 9 17l-5-5"/></Icon>;
+const LayoutGrid = (p) => <Icon {...p}><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></Icon>;
+const ChevronDown = (p) => <Icon {...p}><path d="m6 9 6 6 6-6"/></Icon>;
+const AlertTriangle = (p) => <Icon {...p}><path d="m10.29 3.86-8.18 14.14A1.5 1.5 0 0 0 3.4 20.5h17.2a1.5 1.5 0 0 0 1.3-2.5L13.71 3.86a1.5 1.5 0 0 0-2.42 0Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></Icon>;
+const Star = (p) => <Icon {...p}><path d="M12 2.5 15 9l7 1-5 5 1.3 7-6.3-3.4L5.7 22 7 15l-5-5 7-1 3-6.5Z"/></Icon>;
+const Rows = (p) => <Icon {...p}><rect x="3" y="3" width="18" height="7" rx="1"/><rect x="3" y="14" width="18" height="7" rx="1"/></Icon>;
+const RefreshCw = (p) => <Icon {...p}><path d="M21 12a9 9 0 0 0-15.5-6.36L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 15.5 6.36L21 16"/><path d="M21 21v-5h-5"/></Icon>;
 
 
 // ---------- palette: auto-assigned, one color per horse ----------
@@ -1030,8 +1057,7 @@ function ArrowSwap() {
   return <span className="text-stone-600">↔</span>;
 }
 
-const root = createRoot(document.getElementById('root'));
-root.render(<App />);
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
 </script>
 </body>
 </html>
