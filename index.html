@@ -1,0 +1,1037 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Horse Nation — Stamboom</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  html, body, #root { height: 100%; margin: 0; }
+  body { background: #0c0a09; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script>
+  // ---------- localStorage-backed replacement for Claude Artifacts' window.storage ----------
+  const HN_PREFIX = 'hn-storage:';
+  window.storage = {
+    async get(key) {
+      const v = localStorage.getItem(HN_PREFIX + key);
+      if (v === null) throw new Error('key not found: ' + key);
+      return { key, value: v, shared: false };
+    },
+    async set(key, value) {
+      localStorage.setItem(HN_PREFIX + key, value);
+      return { key, value, shared: false };
+    },
+    async delete(key) {
+      const existed = localStorage.getItem(HN_PREFIX + key) !== null;
+      localStorage.removeItem(HN_PREFIX + key);
+      return { key, deleted: existed, shared: false };
+    },
+    async list(prefix) {
+      const keys = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && k.startsWith(HN_PREFIX)) {
+          const bare = k.slice(HN_PREFIX.length);
+          if (!prefix || bare.startsWith(prefix)) keys.push(bare);
+        }
+      }
+      return { keys, prefix, shared: false };
+    },
+  };
+</script>
+
+<script type="text/babel" data-type="module" data-presets="react">
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "https://esm.sh/react@18";
+import { createRoot } from "https://esm.sh/react-dom@18/client";
+import { Plus, X, Search, Trash2, Link2, Upload, Download, Loader2, Check, LayoutGrid, ChevronDown, AlertTriangle, Star, Rows, RefreshCw } from "https://esm.sh/lucide-react@0.383.0?external=react";
+
+
+// ---------- palette: auto-assigned, one color per horse ----------
+const PALETTE = [
+  '#C97B4A', '#4A90A4', '#B5566B', '#6B8E4E', '#9B6FB5', '#D4A24C',
+  '#5C7C9E', '#B4482F', '#3F8F7A', '#C4638F', '#7A6BB0', '#A3A339',
+  '#4F6B8F', '#C1854A', '#5E9E8A', '#9E5C4F', '#6F9ED4', '#B08D57',
+  '#7A9B6E', '#A85C7A', '#5F8FA0', '#C77B3E', '#8B6FA8', '#4E9E7C',
+];
+const nextColor = (usedCount) => PALETTE[usedCount % PALETTE.length];
+const STORAGE_KEY = 'hn-pedigree-horses-v2';
+const uid = () => Math.random().toString(36).slice(2, 10);
+const CARD_W = 168, CARD_H = 72, COL_W = 230, ROW_H = 96;
+
+function useHorses() {
+  const [horses, setHorses] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [saveState, setSaveState] = useState('idle');
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await window.storage.get(STORAGE_KEY, false);
+        if (res && res.value) setHorses(JSON.parse(res.value));
+      } catch (e) {}
+      finally { setLoading(false); }
+    })();
+  }, []);
+
+  const persist = useCallback(async (next) => {
+    setHorses(next);
+    setSaveState('saving');
+    try {
+      const ok = await window.storage.set(STORAGE_KEY, JSON.stringify(next), false);
+      setSaveState(ok ? 'saved' : 'error');
+    } catch (e) { setSaveState('error'); }
+  }, []);
+
+  return { horses, loading, persist, saveState };
+}
+
+function byId(horses) {
+  const m = new Map();
+  horses.forEach((h) => m.set(h.id, h));
+  return m;
+}
+
+function usageCounts(horses) {
+  const counts = new Map();
+  horses.forEach((h) => {
+    if (h.sireId) counts.set(h.sireId, (counts.get(h.sireId) || 0) + 1);
+    if (h.damId) counts.set(h.damId, (counts.get(h.damId) || 0) + 1);
+  });
+  return counts;
+}
+
+function topUsed(horses, genderFilter, excludeId, limit = 6) {
+  const counts = usageCounts(horses);
+  return horses
+    .filter((h) => h.id !== excludeId && (h.gender === genderFilter || h.gender === 'onbekend') && counts.get(h.id))
+    .sort((a, b) => (counts.get(b.id) || 0) - (counts.get(a.id) || 0))
+    .slice(0, limit);
+}
+
+// Levenshtein-ish quick similarity check: normalized edit distance <= 2 on short names, or one is a prefix of the other
+function similarName(a, b) {
+  const s1 = a.trim().toLowerCase(), s2 = b.trim().toLowerCase();
+  if (!s1 || !s2 || s1 === s2) return false;
+  if (s1.length > 3 && s2.length > 3 && (s1.startsWith(s2) || s2.startsWith(s1))) return true;
+  const dp = Array(s1.length + 1).fill(null).map(() => Array(s2.length + 1).fill(0));
+  for (let i = 0; i <= s1.length; i++) dp[i][0] = i;
+  for (let j = 0; j <= s2.length; j++) dp[0][j] = j;
+  for (let i = 1; i <= s1.length; i++) {
+    for (let j = 1; j <= s2.length; j++) {
+      dp[i][j] = s1[i - 1] === s2[j - 1] ? dp[i - 1][j - 1] : 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+    }
+  }
+  const dist = dp[s1.length][s2.length];
+  return dist > 0 && dist <= 2 && Math.max(s1.length, s2.length) > 3;
+}
+
+function countOccurrences(rootId, map, counts = new Map()) {
+  if (!rootId) return counts;
+  const h = map.get(rootId);
+  if (!h) return counts;
+  counts.set(rootId, (counts.get(rootId) || 0) + 1);
+  if (h.sireId) countOccurrences(h.sireId, map, counts);
+  if (h.damId) countOccurrences(h.damId, map, counts);
+  return counts;
+}
+
+// every path from `personId` to each of its ancestors, within maxDepth generations.
+// includes personId itself at length 0 (needed to catch e.g. a sire that also shows up in the dam's own lineage).
+function personAncestorPaths(personId, map, maxDepth) {
+  const results = [{ id: personId, length: 0 }];
+  function rec(id, length) {
+    if (!id || length > maxDepth) return;
+    const h = map.get(id);
+    if (!h) return;
+    results.push({ id, length });
+    rec(h.sireId, length + 1);
+    rec(h.damId, length + 1);
+  }
+  const p = map.get(personId);
+  if (p) { rec(p.sireId, 1); rec(p.damId, 1); }
+  return results;
+}
+
+// Wright's coefficient of inbreeding for a prospective foal of sireId x damId,
+// counted over `maxDepth` generations on each side (matches Horse Nation's own rule).
+function computeCOI(sireId, damId, map, maxDepth) {
+  if (!sireId || !damId || sireId === damId) return { f: 0, contributions: [] };
+  const groupByOwn = (paths) => {
+    const m = new Map();
+    paths.forEach((p) => { if (!m.has(p.id)) m.set(p.id, []); m.get(p.id).push(p.length); });
+    return m;
+  };
+  const sireMap = groupByOwn(personAncestorPaths(sireId, map, maxDepth));
+  const damMap = groupByOwn(personAncestorPaths(damId, map, maxDepth));
+  let f = 0;
+  const contributions = [];
+  sireMap.forEach((lensS, id) => {
+    if (!damMap.has(id)) return;
+    const lensD = damMap.get(id);
+    let sub = 0;
+    lensS.forEach((n1) => lensD.forEach((n2) => { sub += Math.pow(0.5, n1 + n2 + 1); }));
+    f += sub;
+    contributions.push({ id, contribution: sub, minN1: Math.min(...lensS), minN2: Math.min(...lensD) });
+  });
+  contributions.sort((a, b) => b.contribution - a.contribution);
+  return { f, contributions };
+}
+function coiCategory(f) {
+  if (f <= 0.05) return { label: 'Gezond', color: '#34D399', bg: '#10B98118', border: '#10B98166' };
+  if (f <= 0.125) return { label: 'Verhoogd', color: '#FBBF24', bg: '#F59E0B18', border: '#F59E0B66' };
+  return { label: 'Hoog', color: '#FB7185', bg: '#F4374618', border: '#F4374666' };
+}
+
+// for every horse, which other horses in the roster still carry it within `maxDepth` generations —
+// i.e. who it's still "in range" for, and by exclusion, who it's safe to reuse with.
+function buildReuseInfo(horses, map, maxDepth) {
+  const ancestorSets = new Map();
+  horses.forEach((h) => {
+    const set = new Set(personAncestorPaths(h.id, map, maxDepth).filter((p) => p.length > 0).map((p) => p.id));
+    ancestorSets.set(h.id, set);
+  });
+  const carriers = new Map(); // horseId -> [ids of roster horses that still carry it]
+  horses.forEach((h) => { carriers.set(h.id, []); });
+  horses.forEach((x) => {
+    ancestorSets.get(x.id).forEach((ancestorId) => {
+      if (carriers.has(ancestorId)) carriers.get(ancestorId).push(x.id);
+    });
+  });
+  return carriers;
+}
+
+// generation-based auto layout: horses without parents in column 0, descendants to the right
+function autoLayout(horses) {
+  const map = byId(horses);
+  const colCache = new Map();
+  const visiting = new Set();
+  const colOf = (id) => {
+    if (colCache.has(id)) return colCache.get(id);
+    if (visiting.has(id)) return 0; // guard against accidental cycles
+    visiting.add(id);
+    const h = map.get(id);
+    let c = 0;
+    if (h) {
+      const sc = h.sireId ? colOf(h.sireId) : -1;
+      const dc = h.damId ? colOf(h.damId) : -1;
+      c = Math.max(sc, dc) + 1;
+    }
+    visiting.delete(id);
+    colCache.set(id, c);
+    return c;
+  };
+  const cols = {};
+  horses.forEach((h) => {
+    const c = colOf(h.id);
+    cols[c] = cols[c] || [];
+    cols[c].push(h.id);
+  });
+  const positions = {};
+  Object.keys(cols).map(Number).sort((a, b) => a - b).forEach((c) => {
+    cols[c].forEach((id, i) => {
+      positions[id] = { x: c * COL_W + 40, y: i * ROW_H + 40 };
+    });
+  });
+  return positions;
+}
+
+const GENDER_ICON = { hengst: '♂', merrie: '♀', onbekend: '•' };
+
+// ---------- bulk import ----------
+const DEFAULT_IMPORT = JSON.stringify([
+  { name: "FB-Knijster", gender: "hengst", notes: "Fries — stal Horse Nation" },
+  { name: "Tessa's Tjitske fan it Wyldeblomfjild", gender: "merrie", notes: "Fries — stal Horse Nation" },
+  { name: "Tessa's Master", gender: "hengst", sireName: "FB-Knijster", damName: "Tessa's Tjitske fan it Wyldeblomfjild", notes: "Fries — stal Horse Nation" },
+  { name: "Vanilla Spice's Pixie", gender: "merrie", notes: "Fries — stal Bellezza" },
+  { name: "Vanilla Spice's Rhombicuboctaëder", gender: "hengst", sireName: "Tessa's Master", damName: "Vanilla Spice's Pixie", notes: "Fries — stal Horse Nation" },
+  { name: "parallellepipedum Nova", gender: "merrie", sireName: "Vanilla Spice's Rhombicuboctaëder", damName: "Vanilla Spice's Pixie", notes: "Fries — jouw paard" },
+  { name: "Lyra Nova", gender: "merrie", sireName: "Vanilla Spice's Rhombicuboctaëder", damName: "parallellepipedum Nova", notes: "Fries — jouw paard" },
+  { name: "Luz Nova", gender: "hengst", damName: "Lyra Nova", notes: "Fries — jouw paard. Vader op de screenshot niet leesbaar — nog aan te vullen." },
+], null, 2);
+
+function Modal({ title, onClose, children, wide }) {
+  return (
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 p-4">
+      <div className={`w-full ${wide ? 'max-w-lg' : 'max-w-sm'} rounded-xl border border-stone-700 bg-stone-900 p-5 shadow-2xl`}>
+        <div className="mb-3 flex items-center justify-between">
+          <h3 className="font-serif-hn text-lg text-stone-100">{title}</h3>
+          <button onClick={onClose} className="text-stone-500 hover:text-stone-200"><X size={18} /></button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function ImportModal({ onClose, onImport }) {
+  const [text, setText] = useState(DEFAULT_IMPORT);
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const handleImport = async () => {
+    setError('');
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+      if (!Array.isArray(parsed)) throw new Error('Verwacht een lijst (array) van paarden.');
+    } catch (e) {
+      setError('Kon de tekst niet lezen als JSON: ' + e.message);
+      return;
+    }
+    setBusy(true);
+    await onImport(parsed);
+    setBusy(false);
+    onClose();
+  };
+
+  return (
+    <Modal title="Paarden importeren" onClose={onClose} wide>
+      <p className="mb-3 text-xs text-stone-500">
+        Elke regel is een paard: <code>name</code>, optioneel <code>gender</code>, <code>sireName</code>, <code>damName</code>, <code>notes</code>. Bestaande paarden met dezelfde naam worden hergebruikt. Nieuwe paarden worden automatisch als stamboom neergezet.
+      </p>
+      <textarea
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        rows={12}
+        className="w-full rounded-lg border border-stone-700 bg-stone-950 px-3 py-2 font-mono text-xs text-stone-200 outline-none focus:border-amber-600/60"
+      />
+      {error && <p className="mt-2 text-xs text-rose-400">{error}</p>}
+      <div className="mt-4 flex justify-end gap-2">
+        <button onClick={onClose} className="rounded-lg px-4 py-2 text-sm text-stone-400 hover:text-stone-200">Annuleren</button>
+        <button disabled={busy} onClick={handleImport} className="flex items-center gap-1.5 rounded-lg bg-amber-600 px-4 py-2 text-sm font-medium text-stone-950 hover:bg-amber-500 disabled:opacity-50">
+          {busy ? <Loader2 size={14} className="animate-spin" /> : <Upload size={14} />} Importeren
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+// ---------- full 4-generation entry form ----------
+function seedDraft(rootId, map, maxDepth) {
+  const draft = {};
+  function walk(id, path, depth) {
+    if (depth > maxDepth) return;
+    const h = id ? map.get(id) : null;
+    draft[path] = { id: h ? h.id : null, name: h ? h.name : '' };
+    walk(h ? h.sireId : null, path + 'V', depth + 1);
+    walk(h ? h.damId : null, path + 'M', depth + 1);
+  }
+  const root = map.get(rootId);
+  walk(root ? root.sireId : null, 'V', 1);
+  walk(root ? root.damId : null, 'M', 1);
+  return draft;
+}
+
+function pathLabel(path) {
+  return path.split('').map((c) => (c === 'V' ? 'Vader' : 'Moeder')).join(' ▸ ');
+}
+
+function PedigreeGridModal({ horseId, horses, map, onClose, onSave }) {
+  const root = map.get(horseId);
+  const [draft, setDraft] = useState(() => seedDraft(horseId, map, 4));
+  const [saving, setSaving] = useState(false);
+  const datalistId = 'hn-all-horses';
+
+  const setName = (path, name) => setDraft((d) => ({ ...d, [path]: { ...d[path], name } }));
+  const clearSlot = (path) => setDraft((d) => ({ ...d, [path]: { id: null, name: '' } }));
+
+  const groups = [1, 2, 3, 4].map((depth) => {
+    const paths = [];
+    (function collect(path, d) {
+      if (d === depth) { paths.push(path); return; }
+      if (d > depth) return;
+      collect(path + 'V', d + 1);
+      collect(path + 'M', d + 1);
+    })('', 0);
+    return { depth, paths };
+  });
+
+  const handleSave = async () => {
+    setSaving(true);
+    await onSave(horseId, draft);
+    setSaving(false);
+    onClose();
+  };
+
+  return (
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 p-3">
+      <div className="flex max-h-[90vh] w-full max-w-md flex-col rounded-xl border border-stone-700 bg-stone-900 shadow-2xl">
+        <div className="flex items-center justify-between border-b border-stone-800 px-4 py-3">
+          <h3 className="font-serif-hn text-base text-stone-100">Stamboom van {root?.name} — 4 generaties</h3>
+          <button onClick={onClose} className="text-stone-500 hover:text-stone-200"><X size={18} /></button>
+        </div>
+        <datalist id={datalistId}>
+          {horses.map((h) => <option key={h.id} value={h.name} />)}
+        </datalist>
+        <div className="flex-1 overflow-y-auto px-4 py-3">
+          {groups.map((g) => (
+            <div key={g.depth} className="mb-4">
+              <p className="mb-1.5 text-[10px] uppercase tracking-wide text-stone-500">Generatie {g.depth}{g.depth === 1 ? ' (ouders)' : ''}</p>
+              <div className="space-y-1.5">
+                {g.paths.map((path) => {
+                  const slot = draft[path] || { id: null, name: '' };
+                  const known = !!slot.id;
+                  return (
+                    <div key={path} className="flex items-center gap-2">
+                      <span className="w-24 shrink-0 truncate text-[11px] text-stone-500">{pathLabel(path)}</span>
+                      {known ? (
+                        <div className="flex flex-1 items-center gap-1.5 rounded-lg border border-stone-700 px-2.5 py-1.5">
+                          <span className="h-2 w-2 rounded-full shrink-0" style={{ background: map.get(slot.id)?.color }} />
+                          <span className="flex-1 truncate text-sm text-stone-200">{slot.name}</span>
+                          <button onClick={() => clearSlot(path)} className="text-stone-600 hover:text-rose-500"><X size={13} /></button>
+                        </div>
+                      ) : (
+                        <input
+                          list={datalistId}
+                          value={slot.name}
+                          onChange={(e) => setName(path, e.target.value)}
+                          placeholder="naam (optioneel)"
+                          className="flex-1 rounded-lg border border-stone-700 bg-stone-800/60 px-2.5 py-1.5 text-sm text-stone-100 outline-none focus:border-amber-600/60"
+                        />
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+        <div className="flex justify-end gap-2 border-t border-stone-800 px-4 py-3">
+          <button onClick={onClose} className="rounded-lg px-4 py-2 text-sm text-stone-400 hover:text-stone-200">Annuleren</button>
+          <button disabled={saving} onClick={handleSave} className="flex items-center gap-1.5 rounded-lg bg-amber-600 px-4 py-2 text-sm font-medium text-stone-950 hover:bg-amber-500 disabled:opacity-50">
+            {saving ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />} Opslaan
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function HorseSearchList({ horses, excludeId, onPick, onCreate, genderFilter }) {
+  const [q, setQ] = useState('');
+  const results = horses.filter((h) => h.id !== excludeId).filter((h) => h.name.toLowerCase().includes(q.toLowerCase())).slice(0, 8);
+  const favorites = genderFilter ? topUsed(horses, genderFilter, excludeId) : [];
+  const similar = q.trim() ? horses.filter((h) => h.id !== excludeId && similarName(h.name, q)) : [];
+  return (
+    <div>
+      {favorites.length > 0 && !q.trim() && (
+        <div className="mb-3">
+          <p className="mb-1.5 flex items-center gap-1 text-[10px] uppercase tracking-wide text-stone-500"><Star size={11} /> Vaak gebruikt</p>
+          <div className="flex flex-wrap gap-1.5">
+            {favorites.map((h) => (
+              <button key={h.id} onClick={() => onPick(h.id)} className="flex items-center gap-1.5 rounded-full border border-stone-700 px-2.5 py-1 text-xs text-stone-200 hover:border-amber-600/60">
+                <span className="h-2 w-2 rounded-full shrink-0" style={{ background: h.color }} />{h.name}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+      <input autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="Zoek bestaand paard of typ nieuwe naam…"
+        className="w-full rounded-lg border border-stone-700 bg-stone-800/60 px-3 py-2 text-sm text-stone-100 outline-none focus:border-amber-600/60" />
+      <div className="mt-2 max-h-56 overflow-auto">
+        {results.map((h) => (
+          <button key={h.id} onClick={() => onPick(h.id)} className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-sm text-stone-200 hover:bg-stone-800">
+            <span className="h-2.5 w-2.5 rounded-full shrink-0" style={{ background: h.color }} />{h.name}
+          </button>
+        ))}
+        {q.trim() && (
+          <button onClick={() => onCreate(q.trim())} className="mt-1 flex w-full items-center gap-2 rounded-lg border-t border-stone-800 px-2 py-2 text-left text-sm text-amber-500 hover:bg-stone-800">
+            <Plus size={14} /> Nieuw paard: "{q.trim()}"
+          </button>
+        )}
+        {similar.length > 0 && (
+          <div className="mt-2 flex items-start gap-1.5 rounded-lg border border-amber-700/40 bg-amber-500/10 px-2 py-1.5 text-xs text-amber-400">
+            <AlertTriangle size={13} className="mt-0.5 shrink-0" />
+            <span>Lijkt op {similar.map((h) => `"${h.name}"`).join(', ')} — bedoelde je dat paard? Een typefoutje maakt hier stiekem een dubbel paard van, waardoor de inteelt-check niet meer klopt.</span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------- draggable card ----------
+function HorseCard({ horse, onDrag, onDragEnd, onRename, onCycleGender, onDelete, onPickParent, onSelectForConnect, connectSelected, highlighted, occurrenceCount, map, reuseCount }) {
+  const [editing, setEditing] = useState(false);
+  const [nameDraft, setNameDraft] = useState(horse.name);
+  const dragRef = useRef(null);
+  const startRef = useRef(null);
+
+  const onPointerDown = (e) => {
+    if (editing) return;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    startRef.current = { x: e.clientX, y: e.clientY, ox: horse.x, oy: horse.y };
+    dragRef.current = true;
+  };
+  const onPointerMove = (e) => {
+    if (!dragRef.current || !startRef.current) return;
+    const dx = e.clientX - startRef.current.x;
+    const dy = e.clientY - startRef.current.y;
+    onDrag(horse.id, startRef.current.ox + dx, startRef.current.oy + dy);
+  };
+  const onPointerUp = (e) => {
+    if (!dragRef.current) return;
+    dragRef.current = false;
+    onDragEnd(horse.id);
+  };
+
+  const sire = horse.sireId ? map.get(horse.sireId) : null;
+  const dam = horse.damId ? map.get(horse.damId) : null;
+
+  return (
+    <div
+      className="absolute select-none touch-none"
+      style={{ left: horse.x, top: horse.y, width: CARD_W }}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+    >
+      <div
+        className="group relative rounded-lg border px-2.5 py-2 shadow-md cursor-grab active:cursor-grabbing"
+        style={{
+          background: horse.color + '1f',
+          borderColor: highlighted ? '#F0B429' : connectSelected ? '#60A5FA' : horse.color + '66',
+          boxShadow: highlighted ? '0 0 0 2px #F0B42988' : connectSelected ? '0 0 0 2px #60A5FA88' : 'none',
+        }}
+      >
+        {occurrenceCount > 1 && (
+          <span className="absolute -right-2 -top-2 rounded-full bg-amber-500 px-1.5 py-0.5 text-[10px] font-bold text-stone-950">×{occurrenceCount}</span>
+        )}
+        {reuseCount !== undefined && reuseCount !== null && (
+          <span
+            className="absolute -left-2 -top-2 flex items-center gap-0.5 rounded-full px-1.5 py-0.5 text-[10px] font-bold"
+            style={reuseCount === 0 ? { background: '#10B981', color: '#052e1f' } : { background: '#F59E0B', color: '#2b1502' }}
+            title={reuseCount === 0 ? 'Buiten bereik bij alle paarden in de lijst — vrij te gebruiken' : `Nog binnen bereik bij ${reuseCount} paard(en)`}
+          >
+            {reuseCount === 0 ? '✓' : reuseCount}
+          </span>
+        )}
+        <div className="flex items-center gap-1.5">
+          <button onClick={(e) => { e.stopPropagation(); onCycleGender(horse.id); }} className="shrink-0 text-xs text-stone-400" title="Geslacht wijzigen">
+            {GENDER_ICON[horse.gender] || '•'}
+          </button>
+          {editing ? (
+            <input
+              autoFocus
+              value={nameDraft}
+              onChange={(e) => setNameDraft(e.target.value)}
+              onBlur={() => { setEditing(false); onRename(horse.id, nameDraft.trim() || horse.name); }}
+              onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }}
+              className="min-w-0 flex-1 rounded bg-stone-950 px-1 py-0.5 text-sm text-stone-100 outline-none"
+              onPointerDown={(e) => e.stopPropagation()}
+            />
+          ) : (
+            <button
+              onDoubleClick={(e) => { e.stopPropagation(); setEditing(true); }}
+              onClick={(e) => { e.stopPropagation(); onSelectForConnect(horse.id); }}
+              className="min-w-0 flex-1 truncate text-left text-sm font-medium text-stone-100"
+              title="Dubbeltik om naam te wijzigen"
+            >
+              {horse.name}
+            </button>
+          )}
+          <button onClick={(e) => { e.stopPropagation(); onDelete(horse.id); }} className="shrink-0 text-stone-600 opacity-0 group-hover:opacity-100 hover:text-rose-500">
+            <Trash2 size={12} />
+          </button>
+        </div>
+        <div className="mt-1.5 flex gap-1">
+          <button
+            onClick={(e) => { e.stopPropagation(); onPickParent(horse.id, 'sireId', horse.name); }}
+            className={`flex-1 truncate rounded px-1.5 py-1 text-[10px] ${sire ? 'text-stone-300' : 'border border-dashed border-stone-700 text-stone-500 hover:border-amber-600/60 hover:text-amber-500'}`}
+            style={sire ? { background: sire.color + '22' } : {}}
+            onPointerDown={(e) => e.stopPropagation()}
+          >
+            {sire ? `♂ ${sire.name}` : '+ vader'}
+          </button>
+          <button
+            onClick={(e) => { e.stopPropagation(); onPickParent(horse.id, 'damId', horse.name); }}
+            className={`flex-1 truncate rounded px-1.5 py-1 text-[10px] ${dam ? 'text-stone-300' : 'border border-dashed border-stone-700 text-stone-500 hover:border-amber-600/60 hover:text-amber-500'}`}
+            style={dam ? { background: dam.color + '22' } : {}}
+            onPointerDown={(e) => e.stopPropagation()}
+          >
+            {dam ? `♀ ${dam.name}` : '+ moeder'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ConnectorLines({ horses, map, highlightIds }) {
+  const lines = [];
+  horses.forEach((h) => {
+    [['sireId', h.sireId], ['damId', h.damId]].forEach(([role, pid]) => {
+      const p = pid ? map.get(pid) : null;
+      if (!p) return;
+      const x1 = p.x + CARD_W, y1 = p.y + CARD_H / 2;
+      const x2 = h.x, y2 = h.y + CARD_H / 2;
+      const mx = (x1 + x2) / 2;
+      const isHi = highlightIds && highlightIds.has(p.id) && highlightIds.has(h.id);
+      lines.push(
+        <path
+          key={h.id + '-' + role}
+          d={`M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}`}
+          fill="none"
+          stroke={isHi ? '#F0B429' : (role === 'sireId' ? '#5C7C9E' : '#B5566B')}
+          strokeWidth={isHi ? 2.5 : 1.5}
+          opacity={isHi ? 0.95 : 0.5}
+        />
+      );
+    });
+  });
+  return lines;
+}
+
+// ---------- relation picker (connect-mode: two existing cards) ----------
+function RelationModal({ a, b, onClose, onPick }) {
+  return (
+    <Modal title="Hoe zijn ze verbonden?" onClose={onClose}>
+      <div className="space-y-2">
+        <button onClick={() => onPick(a.id, 'sireId', b.id)} className="w-full rounded-lg border border-stone-700 px-3 py-2 text-left text-sm text-stone-200 hover:border-amber-600/60">
+          <b>{a.name}</b> is de vader van <b>{b.name}</b>
+        </button>
+        <button onClick={() => onPick(a.id, 'damId', b.id)} className="w-full rounded-lg border border-stone-700 px-3 py-2 text-left text-sm text-stone-200 hover:border-amber-600/60">
+          <b>{a.name}</b> is de moeder van <b>{b.name}</b>
+        </button>
+        <button onClick={() => onPick(b.id, 'sireId', a.id)} className="w-full rounded-lg border border-stone-700 px-3 py-2 text-left text-sm text-stone-200 hover:border-amber-600/60">
+          <b>{b.name}</b> is de vader van <b>{a.name}</b>
+        </button>
+        <button onClick={() => onPick(b.id, 'damId', a.id)} className="w-full rounded-lg border border-stone-700 px-3 py-2 text-left text-sm text-stone-200 hover:border-amber-600/60">
+          <b>{b.name}</b> is de moeder van <b>{a.name}</b>
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+function SaveIndicator({ state }) {
+  if (state === 'saving') return <Loader2 size={14} className="animate-spin text-stone-400" />;
+  if (state === 'saved') return <Check size={14} className="text-emerald-500" />;
+  if (state === 'error') return <span className="text-xs text-rose-400">niet opgeslagen</span>;
+  return null;
+}
+
+// ---------- main app ----------
+function App() {
+  const { horses, loading, persist, saveState } = useHorses();
+  const [showImport, setShowImport] = useState(false);
+  const [quickAdd, setQuickAdd] = useState(null); // { childId, role, childName }
+  const [gridForId, setGridForId] = useState(null);
+  const [pickingGridHorse, setPickingGridHorse] = useState(false);
+  const [connectFrom, setConnectFrom] = useState(null);
+  const [relationPair, setRelationPair] = useState(null); // {a, b}
+  const [query, setQuery] = useState('');
+  const [showAnalyse, setShowAnalyse] = useState(false);
+  const [showReuse, setShowReuse] = useState(false);
+  const [focusId, setFocusId] = useState(null);
+  const [compareA, setCompareA] = useState(null);
+  const [compareB, setCompareB] = useState(null);
+  const [depth, setDepth] = useState(4);
+  const dragPositions = useRef({});
+  const [, forceTick] = useState(0);
+  const canvasRef = useRef(null);
+
+  const map = useMemo(() => byId(horses), [horses]);
+
+  const persistHorses = useCallback((next) => persist(next), [persist]);
+
+  const addHorseAt = useCallback(async (name, x, y) => {
+    const h = { id: uid(), name, gender: 'onbekend', sireId: null, damId: null, notes: '', color: nextColor(horses.length), x, y };
+    await persistHorses([...horses, h]);
+    return h.id;
+  }, [horses, persistHorses]);
+
+  const handleNewHorse = () => {
+    const el = canvasRef.current;
+    const x = (el ? el.scrollLeft : 0) + 60 + (horses.length % 5) * 20;
+    const y = (el ? el.scrollTop : 0) + 60 + (horses.length % 5) * 20;
+    addHorseAt('Nieuw paard', x, y);
+  };
+
+  const onDrag = (id, x, y) => {
+    dragPositions.current[id] = { x, y };
+    forceTick((n) => n + 1);
+  };
+  const onDragEnd = async (id) => {
+    const pos = dragPositions.current[id];
+    if (!pos) return;
+    const next = horses.map((h) => (h.id === id ? { ...h, x: pos.x, y: pos.y } : h));
+    delete dragPositions.current[id];
+    await persistHorses(next);
+  };
+
+  const renderHorses = horses.map((h) => (dragPositions.current[h.id] ? { ...h, ...dragPositions.current[h.id] } : h));
+  const renderMap = useMemo(() => byId(renderHorses), [renderHorses]);
+
+  const onRename = async (id, name) => persistHorses(horses.map((h) => (h.id === id ? { ...h, name } : h)));
+  const onCycleGender = async (id) => {
+    const order = ['onbekend', 'hengst', 'merrie'];
+    const h = map.get(id);
+    const next = order[(order.indexOf(h.gender) + 1) % order.length];
+    persistHorses(horses.map((x) => (x.id === id ? { ...x, gender: next } : x)));
+  };
+  const onDelete = async (id) => {
+    const next = horses.filter((h) => h.id !== id).map((h) => ({
+      ...h,
+      sireId: h.sireId === id ? null : h.sireId,
+      damId: h.damId === id ? null : h.damId,
+    }));
+    persistHorses(next);
+    if (focusId === id) setFocusId(null);
+    if (compareA === id) setCompareA(null);
+    if (compareB === id) setCompareB(null);
+  };
+
+  const onPickParent = (childId, role, childName) => setQuickAdd({ childId, role, childName });
+
+  const setParent = async (childId, role, parentId) => {
+    persistHorses(horses.map((h) => (h.id === childId ? { ...h, [role]: parentId } : h)));
+  };
+  const handleQuickPick = async (parentId) => { await setParent(quickAdd.childId, quickAdd.role, parentId); setQuickAdd(null); };
+  const handleQuickCreate = async (name) => {
+    const child = map.get(quickAdd.childId);
+    const x = (child ? child.x : 60) - 40;
+    const y = (child ? child.y : 60) + (quickAdd.role === 'sireId' ? -100 : 100);
+    const id = await addHorseAt(name, x, y);
+    await setParent(quickAdd.childId, quickAdd.role, id);
+    setQuickAdd(null);
+  };
+
+  const onSelectForConnect = (id) => {
+    if (!connectFrom || connectFrom === '__armed__') { setConnectFrom(id); return; }
+    if (connectFrom === id) { setConnectFrom('__armed__'); return; }
+    setRelationPair({ a: map.get(connectFrom), b: map.get(id) });
+    setConnectFrom(null);
+  };
+  const applyRelation = async (childId, role, parentId) => {
+    persistHorses(horses.map((h) => (h.id === childId ? { ...h, [role]: parentId } : h)));
+    setRelationPair(null);
+  };
+
+  const importHorses = useCallback(async (entries) => {
+    const working = [...horses];
+    const isNew = new Set();
+    const findOrCreate = (name) => {
+      if (!name) return null;
+      let h = working.find((x) => x.name.toLowerCase() === String(name).toLowerCase());
+      if (!h) {
+        h = { id: uid(), name: String(name), gender: 'onbekend', sireId: null, damId: null, notes: '', color: nextColor(working.length), x: 40, y: 40 };
+        working.push(h);
+        isNew.add(h.id);
+      }
+      return h;
+    };
+    entries.forEach((e) => {
+      const h = findOrCreate(e.name);
+      if (!h) return;
+      if (e.gender) h.gender = e.gender;
+      if (e.notes) h.notes = e.notes;
+      if (e.sireName) h.sireId = findOrCreate(e.sireName)?.id ?? h.sireId;
+      if (e.damName) h.damId = findOrCreate(e.damName)?.id ?? h.damId;
+    });
+    const positions = autoLayout(working);
+    working.forEach((h) => { if (isNew.has(h.id)) { h.x = positions[h.id].x; h.y = positions[h.id].y; } });
+    await persistHorses(working);
+  }, [horses, persistHorses]);
+
+  const handleAutoLayout = async () => {
+    const positions = autoLayout(horses);
+    const next = horses.map((h) => ({ ...h, x: positions[h.id].x, y: positions[h.id].y }));
+    await persistHorses(next);
+  };
+
+  const savePedigreeGrid = useCallback(async (rootId, draft) => {
+    const working = [...horses];
+    const isNew = new Set();
+    const findOrCreate = (name) => {
+      if (!name || !name.trim()) return null;
+      const trimmed = name.trim();
+      let h = working.find((x) => x.name.toLowerCase() === trimmed.toLowerCase());
+      if (!h) {
+        h = { id: uid(), name: trimmed, gender: 'onbekend', sireId: null, damId: null, notes: '', color: nextColor(working.length), x: 40, y: 40 };
+        working.push(h);
+        isNew.add(h.id);
+      }
+      return h;
+    };
+    // resolve every typed slot to a horse id
+    const resolved = {};
+    Object.keys(draft).forEach((path) => {
+      const slot = draft[path];
+      if (slot.id) { resolved[path] = slot.id; return; }
+      const h = findOrCreate(slot.name);
+      if (h) resolved[path] = h.id;
+    });
+    // link each resolved slot to its children slots (path+'V' = sire, path+'M' = dam)
+    const root = working.find((h) => h.id === rootId);
+    if (root) {
+      if (resolved['V']) root.sireId = resolved['V'];
+      if (resolved['M']) root.damId = resolved['M'];
+    }
+    Object.keys(resolved).forEach((path) => {
+      const h = working.find((x) => x.id === resolved[path]);
+      if (!h) return;
+      if (resolved[path + 'V']) h.sireId = resolved[path + 'V'];
+      if (resolved[path + 'M']) h.damId = resolved[path + 'M'];
+    });
+    const positions = autoLayout(working);
+    working.forEach((h) => { if (isNew.has(h.id)) { h.x = positions[h.id].x; h.y = positions[h.id].y; } });
+    await persistHorses(working);
+  }, [horses, persistHorses]);
+
+  const handleExport = () => {
+    const blob = new Blob([JSON.stringify(horses, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `horse-nation-stamboom-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const treeOccurrences = useMemo(() => (focusId ? countOccurrences(focusId, map) : new Map()), [focusId, map]);
+  const reuseCarriers = useMemo(() => (showReuse || focusId ? buildReuseInfo(horses, map, depth) : null), [showReuse, focusId, horses, map, depth]);
+  const compareResult = useMemo(() => {
+    if (!compareA || !compareB) return null;
+    const { f, contributions } = computeCOI(compareA, compareB, map, depth);
+    const cat = coiCategory(f);
+    const horseA = map.get(compareA), horseB = map.get(compareB);
+    const genderWarning = horseA && horseB && horseA.gender !== 'onbekend' && horseB.gender !== 'onbekend' && horseA.gender === horseB.gender;
+    const highlightIds = new Set(contributions.map((c) => c.id));
+    return { f, contributions, cat, genderWarning, highlightIds };
+  }, [compareA, compareB, depth, map]);
+
+  const canvasSize = useMemo(() => {
+    let maxX = 800, maxY = 600;
+    renderHorses.forEach((h) => { maxX = Math.max(maxX, h.x + CARD_W + 200); maxY = Math.max(maxY, h.y + CARD_H + 200); });
+    return { width: maxX, height: maxY };
+  }, [renderHorses]);
+
+  if (loading) {
+    return <div className="flex h-screen items-center justify-center bg-stone-950"><Loader2 className="animate-spin text-stone-600" size={28} /></div>;
+  }
+
+  const dimNonMatching = query.trim().length > 0;
+
+  return (
+    <div className="flex h-screen flex-col bg-stone-950 text-stone-200" style={{ fontFamily: 'ui-sans-serif, system-ui' }}>
+      <style>{`.font-serif-hn { font-family: 'Georgia', 'Iowan Old Style', serif; }`}</style>
+
+      <header className="shrink-0 border-b border-stone-800 bg-stone-900/60 px-4 py-2.5">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Link2 className="text-amber-500" size={18} />
+            <h1 className="font-serif-hn text-lg text-stone-50">Horse Nation — Stamboom</h1>
+          </div>
+          <div className="flex items-center gap-2.5">
+            <SaveIndicator state={saveState} />
+            <span className="text-xs text-stone-500">{horses.length} paarden</span>
+          </div>
+        </div>
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <div className="relative">
+            <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-stone-500" />
+            <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Zoeken…"
+              className="w-32 rounded-lg border border-stone-700 bg-stone-900 py-1.5 pl-7 pr-2 text-xs outline-none focus:border-amber-600/60" />
+          </div>
+          <button onClick={handleNewHorse} className="flex items-center gap-1 rounded-lg bg-amber-600 px-2.5 py-1.5 text-xs font-medium text-stone-950 hover:bg-amber-500">
+            <Plus size={13} /> Paard
+          </button>
+          <button onClick={() => setShowImport(true)} className="flex items-center gap-1 rounded-lg border border-stone-700 px-2.5 py-1.5 text-xs text-stone-300 hover:border-amber-600/60 hover:text-amber-400">
+            <Upload size={13} /> Importeren
+          </button>
+          <button onClick={handleAutoLayout} className="flex items-center gap-1 rounded-lg border border-stone-700 px-2.5 py-1.5 text-xs text-stone-300 hover:border-amber-600/60 hover:text-amber-400">
+            <LayoutGrid size={13} /> Schik als stamboom
+          </button>
+          <button onClick={() => setPickingGridHorse(true)} className="flex items-center gap-1 rounded-lg border border-stone-700 px-2.5 py-1.5 text-xs text-stone-300 hover:border-amber-600/60 hover:text-amber-400">
+            <Rows size={13} /> Stamboom invullen
+          </button>
+          <button onClick={handleExport} className="flex items-center gap-1 rounded-lg border border-stone-700 px-2.5 py-1.5 text-xs text-stone-300 hover:border-amber-600/60 hover:text-amber-400">
+            <Download size={13} /> Export
+          </button>
+          <button
+            onClick={() => setConnectFrom(connectFrom ? null : '__armed__')}
+            className={`flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-xs ${connectFrom ? 'border-blue-500 text-blue-400 bg-blue-500/10' : 'border-stone-700 text-stone-300 hover:border-amber-600/60 hover:text-amber-400'}`}
+          >
+            <Link2 size={13} /> {connectFrom ? 'Tik 2 kaartjes aan…' : 'Verbinden'}
+          </button>
+          <button onClick={() => setShowReuse((v) => !v)} className={`flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-xs ${showReuse ? 'border-amber-600/60 text-amber-400 bg-amber-500/10' : 'border-stone-700 text-stone-300 hover:border-amber-600/60 hover:text-amber-400'}`} title={`Toont per paard of hij nog binnen ${depth} generaties bij iemand voorkomt`}>
+            <RefreshCw size={13} /> Herbruikbaar
+          </button>
+          <button onClick={() => setShowAnalyse((v) => !v)} className={`flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-xs ${showAnalyse ? 'border-amber-600/60 text-amber-400 bg-amber-500/10' : 'border-stone-700 text-stone-300 hover:border-amber-600/60 hover:text-amber-400'}`}>
+            <ChevronDown size={13} /> Kruising checken
+          </button>
+        </div>
+
+        {showAnalyse && (
+          <div className="mt-2 rounded-lg border border-stone-800 bg-stone-900/60 p-3">
+            <div className="flex flex-wrap items-center gap-3 text-xs">
+              <select value={compareA || ''} onChange={(e) => setCompareA(e.target.value || null)} className="rounded border border-stone-700 bg-stone-800 px-1.5 py-1 text-stone-200">
+                <option value="">Hengst</option>
+                {horses.filter((h) => h.gender !== 'merrie').map((h) => <option key={h.id} value={h.id}>♂ {h.name}</option>)}
+              </select>
+              <ArrowSwap />
+              <select value={compareB || ''} onChange={(e) => setCompareB(e.target.value || null)} className="rounded border border-stone-700 bg-stone-800 px-1.5 py-1 text-stone-200">
+                <option value="">Merrie</option>
+                {horses.filter((h) => h.gender !== 'hengst').map((h) => <option key={h.id} value={h.id}>♀ {h.name}</option>)}
+              </select>
+              <label className="flex items-center gap-1.5">
+                over <input type="range" min={2} max={6} value={depth} onChange={(e) => setDepth(Number(e.target.value))} className="accent-amber-500" /> generaties
+              </label>
+              <span className="mx-2 h-4 w-px bg-stone-700" />
+              <label className="flex items-center gap-1.5 text-stone-400">
+                Voorouders bekijken van 1 paard:
+                <select value={focusId || ''} onChange={(e) => setFocusId(e.target.value || null)} className="rounded border border-stone-700 bg-stone-800 px-1.5 py-1 text-stone-200">
+                  <option value="">— geen —</option>
+                  {horses.map((h) => <option key={h.id} value={h.id}>{h.name}</option>)}
+                </select>
+              </label>
+              {(focusId || compareA || compareB) && (
+                <button onClick={() => { setFocusId(null); setCompareA(null); setCompareB(null); }} className="text-stone-500 hover:text-stone-300">wissen</button>
+              )}
+            </div>
+
+            {focusId && reuseCarriers && (() => {
+              const stillCarrying = (reuseCarriers.get(focusId) || []).filter((id) => id !== focusId).map((id) => map.get(id)?.name).filter(Boolean);
+              return (
+                <div className="mt-2 rounded-lg border px-3 py-2 text-xs" style={stillCarrying.length === 0 ? { borderColor: '#10B98166', background: '#10B98118' } : { borderColor: '#F59E0B66', background: '#F59E0B18' }}>
+                  {stillCarrying.length === 0 ? (
+                    <p style={{ color: '#34D399' }}>✓ {map.get(focusId)?.name} zit bij niemand in de lijst meer binnen {depth} generaties — vrij te gebruiken.</p>
+                  ) : (
+                    <p style={{ color: '#FBBF24' }}>{map.get(focusId)?.name} zit nog binnen {depth} generaties bij: {stillCarrying.join(', ')}. Met alle anderen kan hij weer ingezet worden.</p>
+                  )}
+                </div>
+              );
+            })()}
+
+            {compareResult && (
+              <div className="mt-3">
+                <div className="flex items-center gap-3 rounded-lg border px-3 py-2.5" style={{ borderColor: compareResult.cat.border, background: compareResult.cat.bg }}>
+                  <span className="text-2xl font-bold" style={{ color: compareResult.cat.color }}>{(compareResult.f * 100).toFixed(2)}%</span>
+                  <div className="text-sm">
+                    <p style={{ color: compareResult.cat.color }} className="font-medium">Verwachte veulen-COI — {compareResult.cat.label}</p>
+                    <p className="text-xs text-stone-400">
+                      {compareResult.f <= 0.05 ? 'Lage inteelt, geen reden tot zorgen.' : compareResult.f <= 0.125 ? 'Merkbare inteelt — overweeg een minder verwante partner.' : 'Sterke inteelt — kans op inteeltdepressie bij het veulen.'}
+                    </p>
+                  </div>
+                </div>
+                {compareResult.contributions.length > 0 && (
+                  <ul className="mt-2 space-y-0.5 text-xs text-stone-300">
+                    {compareResult.contributions.map((c) => (
+                      <li key={c.id} className="flex items-center gap-1.5">
+                        <span className="h-2 w-2 rounded-full shrink-0" style={{ background: map.get(c.id)?.color }} />
+                        <b>{map.get(c.id)?.name}</b>
+                        <span className="text-stone-500">— +{(c.contribution * 100).toFixed(2)}% (dichtsbijzijnde gen {c.minN1}/{c.minN2})</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {compareResult.genderWarning && (
+                  <p className="mt-1.5 text-xs text-stone-500">Let op: dit zijn twee paarden van hetzelfde geslacht.</p>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+      </header>
+
+      <div ref={canvasRef} className="relative flex-1 overflow-auto bg-[radial-gradient(circle,_#292524_1px,_transparent_1px)] [background-size:22px_22px]">
+        <div className="relative" style={{ width: canvasSize.width, height: canvasSize.height }}>
+          {horses.length === 0 ? (
+            <div className="absolute inset-0 flex items-center justify-center">
+              <div className="rounded-xl border border-dashed border-stone-800 px-8 py-10 text-center text-stone-500">
+                Nog geen paarden. Tik op <b>+ Paard</b> om te beginnen, of <b>Importeren</b>.
+              </div>
+            </div>
+          ) : (
+            <>
+              <svg className="pointer-events-none absolute left-0 top-0" width={canvasSize.width} height={canvasSize.height}>
+                <ConnectorLines horses={renderHorses} map={renderMap} highlightIds={compareResult?.highlightIds} />
+              </svg>
+              {renderHorses.map((h) => {
+                const matches = !dimNonMatching || h.name.toLowerCase().includes(query.toLowerCase());
+                const highlighted = compareResult?.highlightIds?.has(h.id) || false;
+                const occ = focusId ? (treeOccurrences.get(h.id) || 0) : 0;
+                const reuseCount = (showReuse && reuseCarriers) ? (reuseCarriers.get(h.id) || []).filter((id) => id !== h.id).length : null;
+                return (
+                  <div key={h.id} style={{ opacity: matches ? 1 : 0.25 }}>
+                    <HorseCard
+                      horse={h}
+                      map={renderMap}
+                      reuseCount={reuseCount}
+                      onDrag={onDrag}
+                      onDragEnd={onDragEnd}
+                      onRename={onRename}
+                      onCycleGender={onCycleGender}
+                      onDelete={onDelete}
+                      onPickParent={onPickParent}
+                      onSelectForConnect={connectFrom ? onSelectForConnect : () => {}}
+                      connectSelected={connectFrom === h.id}
+                      highlighted={highlighted}
+                      occurrenceCount={occ}
+                    />
+                  </div>
+                );
+              })}
+            </>
+          )}
+        </div>
+      </div>
+
+      {showImport && <ImportModal onClose={() => setShowImport(false)} onImport={importHorses} />}
+
+      {quickAdd && (
+        <Modal title={`${quickAdd.role === 'sireId' ? 'Vader' : 'Moeder'} van ${quickAdd.childName}`} onClose={() => setQuickAdd(null)}>
+          <HorseSearchList
+            horses={horses.filter((h) => h.id !== quickAdd.childId)}
+            onPick={handleQuickPick}
+            onCreate={handleQuickCreate}
+            genderFilter={quickAdd.role === 'sireId' ? 'hengst' : 'merrie'}
+          />
+        </Modal>
+      )}
+
+      {pickingGridHorse && (
+        <Modal title="Voor welk paard?" onClose={() => setPickingGridHorse(false)}>
+          <HorseSearchList
+            horses={horses}
+            onPick={(id) => { setPickingGridHorse(false); setGridForId(id); }}
+            onCreate={async (name) => { const id = await addHorseAt(name, 60, 60); setPickingGridHorse(false); setGridForId(id); }}
+          />
+        </Modal>
+      )}
+
+      {gridForId && (
+        <PedigreeGridModal
+          horseId={gridForId}
+          horses={horses}
+          map={map}
+          onClose={() => setGridForId(null)}
+          onSave={savePedigreeGrid}
+        />
+      )}
+
+      {relationPair && (
+        <RelationModal a={relationPair.a} b={relationPair.b} onClose={() => setRelationPair(null)} onPick={applyRelation} />
+      )}
+    </div>
+  );
+}
+
+function ArrowSwap() {
+  return <span className="text-stone-600">↔</span>;
+}
+
+const root = createRoot(document.getElementById('root'));
+root.render(<App />);
+</script>
+</body>
+</html>
