@@ -4,10 +4,10 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Horse Nation — Stamboom</title>
-<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-<script src="https://cdn.tailwindcss.com"></script>
-<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" onerror="window.dispatchEvent(new ErrorEvent('error',{message:'Kon niet laden: https://unpkg.com/react@18/umd/react.production.min.js'}))"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" onerror="window.dispatchEvent(new ErrorEvent('error',{message:'Kon niet laden: https://unpkg.com/react-dom@18/umd/react-dom.production.min.js'}))"></script>
+<script src="https://cdn.tailwindcss.com" onerror="window.dispatchEvent(new ErrorEvent('error',{message:'Kon niet laden: https://cdn.tailwindcss.com'}))"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js" onerror="window.dispatchEvent(new ErrorEvent('error',{message:'Kon niet laden: https://unpkg.com/@babel/standalone/babel.min.js'}))"></script>
 <style>
   html, body, #root { height: 100%; margin: 0; }
   body { background: #0c0a09; }
@@ -17,6 +17,23 @@
 </head>
 <body>
 <div id="root"></div>
+
+<script>
+  window.addEventListener('error', function (e) {
+    var root = document.getElementById('root');
+    if (root && !root.dataset.mounted) {
+      var msg = (e.message || (e.error && e.error.message) || 'onbekende fout');
+      root.innerHTML =
+        '<pre style="color:#fca5a5;background:#1c1917;padding:16px;white-space:pre-wrap;' +
+        'font-family:monospace;font-size:13px;line-height:1.5;">' +
+        'Er ging iets mis bij het laden:\n\n' + msg +
+        (e.filename ? ('\n\nBestand: ' + e.filename) : '') +
+        (e.lineno ? ('\nRegel: ' + e.lineno) : '') +
+        '</pre>';
+    }
+  });
+</script>
+
 
 <script>
   // ---------- localStorage-backed replacement for Claude Artifacts' window.storage ----------
@@ -1058,6 +1075,7 @@ function ArrowSwap() {
 }
 
 ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+document.getElementById('root').dataset.mounted = '1';
 </script>
 </body>
 </html>
